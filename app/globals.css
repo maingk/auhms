@@ -1,0 +1,12 @@
+/* Global styles placeholder — UI component library not yet selected.
+   See ARCHITECTURE.md §4 Pending Decisions: shadcn/ui, Mantine, or Radix. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, sans-serif;
+}

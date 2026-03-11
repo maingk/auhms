@@ -1,0 +1,402 @@
+// =============================================================================
+// AUHMS Prisma Schema
+// Database: PostgreSQL via Supabase
+//
+// Conventions (from ARCHITECTURE.md §5):
+//   - All tables/columns: snake_case
+//   - Primary keys: UUID, named `id`, default gen_random_uuid()
+//   - Foreign keys: referenced_table_singular_id (e.g. student_id, room_id)
+//   - Timestamps: created_at, updated_at — TIMESTAMPTZ NOT NULL DEFAULT NOW()
+//   - Soft deletes: deleted_at TIMESTAMPTZ NULL — NULL = active, non-NULL = deleted
+//   - Enums: PostgreSQL native ENUM types
+//   - Booleans: TRUE/FALSE only — never 0/1 or Y/N strings
+//   - RLS policies are managed in Supabase on all tables containing student data
+//
+// Schema changes: always via `prisma migrate dev` — never manual DDL in production.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  // Use pooled URL for runtime queries (PgBouncer-compatible)
+  url       = env("DATABASE_URL")
+  // Use direct URL for migrations (bypasses PgBouncer)
+  directUrl = env("DIRECT_URL")
+}
+
+// =============================================================================
+// Enums
+// =============================================================================
+
+enum UserRole {
+  HOUSING_ADMIN
+  HOUSING_STAFF
+  STUDENT
+  IT_ADMIN
+  READ_ONLY_REPORTER
+
+  @@map("user_role")
+}
+
+enum BuildingStatus {
+  ACTIVE
+  INACTIVE
+  UNDER_RENOVATION
+
+  @@map("building_status")
+}
+
+enum RoomType {
+  SINGLE
+  DOUBLE
+  TRIPLE
+  SUITE
+  APARTMENT
+
+  @@map("room_type")
+}
+
+enum RoomStatus {
+  AVAILABLE
+  OCCUPIED
+  MAINTENANCE
+  OFFLINE
+
+  @@map("room_status")
+}
+
+enum ApplicationStatus {
+  DRAFT
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  WAITLISTED
+  CANCELLED
+
+  @@map("application_status")
+}
+
+enum AssignmentStatus {
+  PENDING
+  ACTIVE
+  CANCELLED
+  COMPLETED
+
+  @@map("assignment_status")
+}
+
+enum MaintenancePriority {
+  LOW
+  MEDIUM
+  HIGH
+  EMERGENCY
+
+  @@map("maintenance_priority")
+}
+
+enum MaintenanceStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+
+  @@map("maintenance_status")
+}
+
+enum LeaseStatus {
+  DRAFT
+  SENT
+  SIGNED
+  EXPIRED
+  TERMINATED
+
+  @@map("lease_status")
+}
+
+enum AuditAction {
+  READ
+  CREATE
+  UPDATE
+  DELETE
+  LOGIN
+  LOGOUT
+  EXPORT
+
+  @@map("audit_action")
+}
+
+// =============================================================================
+// App Users
+// Maps Azure AD identities to AUHMS roles.
+// Staff entries are created manually by an IT Admin.
+// Students are auto-provisioned with STUDENT role on first sign-in.
+// azure_oid is the stable Object ID from the Azure AD JWT (oid claim).
+// =============================================================================
+
+model AppUser {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  azure_oid  String    @unique // Azure AD Object ID — stable, never changes
+  email      String    @unique // Captured for human-readable reference
+  role       UserRole  @default(STUDENT)
+  created_at DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at DateTime  @updatedAt @db.Timestamptz(6)
+  deleted_at DateTime? @db.Timestamptz(6)
+
+  @@map("app_users")
+}
+
+// =============================================================================
+// Buildings
+// Physical buildings on campus. Parent of rooms.
+// =============================================================================
+
+model Building {
+  id         String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name       String
+  code       String         @unique
+  address    String?
+  floors     Int?
+  status     BuildingStatus @default(ACTIVE)
+  created_at DateTime       @default(now()) @db.Timestamptz(6)
+  updated_at DateTime       @updatedAt @db.Timestamptz(6)
+  deleted_at DateTime?      @db.Timestamptz(6)
+
+  rooms Room[]
+
+  @@map("buildings")
+}
+
+// =============================================================================
+// Rooms
+// Individual rooms within a building.
+// Note: maintenance_requests belong to rooms (not students) — rooms persist
+// between tenants.
+// =============================================================================
+
+model Room {
+  id          String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  building_id String     @db.Uuid
+  room_number String
+  floor       Int?
+  room_type   RoomType
+  capacity    Int
+  status      RoomStatus @default(AVAILABLE)
+  amenities   Json?      // e.g. { "ac": true, "private_bath": false }
+  created_at  DateTime   @default(now()) @db.Timestamptz(6)
+  updated_at  DateTime   @updatedAt @db.Timestamptz(6)
+  deleted_at  DateTime?  @db.Timestamptz(6)
+
+  building             Building             @relation(fields: [building_id], references: [id])
+  room_assignments     RoomAssignment[]
+  maintenance_requests MaintenanceRequest[]
+
+  // A room_number must be unique within a building
+  @@unique([building_id, room_number])
+  @@map("rooms")
+}
+
+// =============================================================================
+// Students
+// Sourced from Colleague ERP via nightly batch sync — never created manually.
+// colleague_id is the system-of-record identifier; UUID is the AUHMS internal key.
+// RLS required: student records are FERPA-protected.
+// =============================================================================
+
+model Student {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  colleague_id      String    @unique // Colleague student ID — system of record
+  email             String    @unique // University email address
+  first_name        String
+  last_name         String
+  date_of_birth     DateTime? @db.Date
+  phone             String?
+  enrollment_status String?   // e.g. "ENROLLED", "WITHDRAWN" — values from Colleague
+  last_synced_at    DateTime? @db.Timestamptz(6) // When Colleague last pushed this record
+  created_at        DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at        DateTime  @updatedAt @db.Timestamptz(6)
+  deleted_at        DateTime? @db.Timestamptz(6)
+
+  housing_applications HousingApplication[]
+  room_assignments     RoomAssignment[]
+  billing_charges      BillingCharge[]
+
+  @@map("students")
+}
+
+// =============================================================================
+// Housing Applications
+// A student's application for housing for a given term.
+// Constraint: one application per student per term.
+// =============================================================================
+
+model HousingApplication {
+  id           String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  student_id   String            @db.Uuid
+  term         String            // e.g. "2025FA", "2026SP" — format TBD with Housing
+  status       ApplicationStatus @default(DRAFT)
+  submitted_at DateTime?         @db.Timestamptz(6)
+  notes        String?
+  created_at   DateTime          @default(now()) @db.Timestamptz(6)
+  updated_at   DateTime          @updatedAt @db.Timestamptz(6)
+  deleted_at   DateTime?         @db.Timestamptz(6)
+
+  student              Student              @relation(fields: [student_id], references: [id])
+  room_assignment      RoomAssignment?
+  roommate_preferences RoommatePreference[]
+
+  // One application per student per term
+  @@unique([student_id, term])
+  @@map("housing_applications")
+}
+
+// =============================================================================
+// Roommate Preferences
+// Student-expressed roommate preferences stored against an application.
+// preferred_student_id is nullable — a student may express a preference without
+// knowing the specific Colleague ID.
+// =============================================================================
+
+model RoommatePreference {
+  id                   String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  application_id       String    @db.Uuid
+  preferred_student_id String?   @db.Uuid // May be null if student isn't yet in system
+  notes                String?
+  created_at           DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at           DateTime  @updatedAt @db.Timestamptz(6)
+  deleted_at           DateTime? @db.Timestamptz(6)
+
+  application HousingApplication @relation(fields: [application_id], references: [id])
+
+  @@map("roommate_preferences")
+}
+
+// =============================================================================
+// Room Assignments
+// Active link between a student and a room for a term.
+// One student, one room, one term (enforced by unique constraint on active records).
+// Soft-delete only — FERPA requires assignment history to be preserved.
+// =============================================================================
+
+model RoomAssignment {
+  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  student_id     String           @db.Uuid
+  room_id        String           @db.Uuid
+  application_id String?          @unique @db.Uuid // Nullable — staff may assign without an application; @unique enforces one assignment per application
+  term           String
+  status         AssignmentStatus @default(PENDING)
+  start_date     DateTime         @db.Date
+  end_date       DateTime?        @db.Date
+  created_at     DateTime         @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime         @updatedAt @db.Timestamptz(6)
+  deleted_at     DateTime?        @db.Timestamptz(6)
+
+  student     Student             @relation(fields: [student_id], references: [id])
+  room        Room                @relation(fields: [room_id], references: [id])
+  application HousingApplication? @relation(fields: [application_id], references: [id])
+  lease       Lease?
+  billing_charges BillingCharge[]
+
+  @@map("room_assignments")
+}
+
+// =============================================================================
+// Maintenance Requests
+// Submitted by students or staff against a specific room.
+// Belongs to a room, not a student — rooms persist between tenants.
+// submitted_by holds the Azure AD user ID of whoever filed the request.
+// =============================================================================
+
+model MaintenanceRequest {
+  id           String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  room_id      String              @db.Uuid
+  submitted_by String              // Azure AD user ID (staff or student)
+  title        String
+  description  String
+  priority     MaintenancePriority @default(MEDIUM)
+  status       MaintenanceStatus   @default(OPEN)
+  resolved_at  DateTime?           @db.Timestamptz(6)
+  notes        String?
+  created_at   DateTime            @default(now()) @db.Timestamptz(6)
+  updated_at   DateTime            @updatedAt @db.Timestamptz(6)
+  deleted_at   DateTime?           @db.Timestamptz(6)
+
+  room Room @relation(fields: [room_id], references: [id])
+
+  @@map("maintenance_requests")
+}
+
+// =============================================================================
+// Leases
+// Formal lease record tied to a room_assignment.
+// The actual document is stored in SharePoint; only the URL is stored here.
+// =============================================================================
+
+model Lease {
+  id            String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  assignment_id String      @unique @db.Uuid
+  sharepoint_url String?    // URL to document in SharePoint via Graph API
+  status        LeaseStatus @default(DRAFT)
+  signed_at     DateTime?   @db.Timestamptz(6)
+  expires_at    DateTime?   @db.Timestamptz(6)
+  created_at    DateTime    @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime    @updatedAt @db.Timestamptz(6)
+  deleted_at    DateTime?   @db.Timestamptz(6)
+
+  assignment RoomAssignment @relation(fields: [assignment_id], references: [id])
+
+  @@map("leases")
+}
+
+// =============================================================================
+// Billing Charges
+// Charges generated by AUHMS, exported to Colleague ERP.
+// AUHMS never processes payments — charges are written to Colleague and handled there.
+// exported_at and export_batch_id track export status for reconciliation.
+// =============================================================================
+
+model BillingCharge {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  student_id      String    @db.Uuid
+  assignment_id   String    @db.Uuid
+  charge_code     String    // Colleague charge code — format confirmed with Finance/IT
+  amount          Decimal   @db.Decimal(10, 2)
+  description     String?
+  term            String
+  exported_at     DateTime? @db.Timestamptz(6) // Set when included in a Colleague export batch
+  export_batch_id String?   // Batch identifier for reconciliation
+  created_at      DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime  @updatedAt @db.Timestamptz(6)
+  deleted_at      DateTime? @db.Timestamptz(6)
+
+  student    Student        @relation(fields: [student_id], references: [id])
+  assignment RoomAssignment @relation(fields: [assignment_id], references: [id])
+
+  @@map("billing_charges")
+}
+
+// =============================================================================
+// Audit Log
+// Immutable log of all access to and changes of student records.
+// Required for FERPA compliance. Records are never soft-deleted.
+// Every read and write of student records must produce an entry here.
+// =============================================================================
+
+model AuditLog {
+  id         String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id    String      // Azure AD user ID (oid claim)
+  user_email String      // Captured at time of action for human-readable log
+  action     AuditAction
+  table_name String      // Which table was accessed/modified
+  record_id  String?     // The id of the affected record (if applicable)
+  old_values Json?       // Previous state for UPDATE/DELETE
+  new_values Json?       // New state for CREATE/UPDATE
+  ip_address String?
+  user_agent String?
+  created_at DateTime    @default(now()) @db.Timestamptz(6)
+
+  // No updated_at or deleted_at — audit records are immutable
+  @@map("audit_log")
+}
