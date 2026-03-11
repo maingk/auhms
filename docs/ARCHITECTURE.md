@@ -210,11 +210,28 @@
 
 > ⚠ UPDATE THIS SECTION AT THE START OF EVERY CLAUDE CODE SESSION
 
-- **Sprint:** [N]
-- **Dates:** [start] – [end]
-- **Focus:** [e.g., "Scaffolding Next.js project with Prisma and Supabase connection"]
-- **Active files / modules:** [list files Claude should be aware of]
-- **Blockers / known issues:** [anything Claude should know]
+- **Sprint:** 1 — Complete
+- **Dates:** 2026-03-02
+- **Focus:** Project scaffolding, database setup, authentication
+- **Completed this sprint:**
+  - Next.js 14 project scaffolded with App Router and TypeScript
+  - Prisma schema created for all 10 entities (buildings, rooms, students, housing_applications, roommate_preferences, room_assignments, maintenance_requests, leases, billing_charges, audit_log) plus app_users for RBAC
+  - Supabase PostgreSQL database provisioned; initial migrations applied
+  - Azure AD SSO working end-to-end via NextAuth.js (JWT strategy)
+  - Route protection via middleware — all routes except /login require authentication
+  - app_users table auto-provisions users on first sign-in with STUDENT role
+  - Audit logging utility (lib/audit.ts) in place for FERPA compliance
+  - All 9 module placeholder pages and API route stubs created
+  - next.config.ts → next.config.mjs (Next.js 14 does not support .ts config)
+  - dotenv-cli added so Prisma CLI picks up .env.local
+  - @auth/prisma-adapter removed (incompatible with next-auth v4; JWT strategy does not need it)
+- **Active files / modules:** All files are scaffold-level; no module has full CRUD yet
+- **Next sprint focus:** Buildings and Rooms modules — list views, add/edit forms, API routes
+- **Blockers / known issues:**
+  - UI component library not yet selected (shadcn/ui, Mantine, or Radix) — decision needed before building real UI
+  - Developer's app registration is in a personal Microsoft tenant; must be recreated in Averett tenant before production
+  - RLS policies not yet written — required before any staging or production deployment
+  - Developer's app_users role is STUDENT — change to HOUSING_ADMIN for development (use Prisma Studio: npm run db:studio)
 
 ---
 
@@ -230,3 +247,4 @@
 | 2026-03-01 | No internal payment processing | Billing stays in Colleague, reduces compliance scope, consistent with existing workflows | Team |
 | 2026-03-01 | Soft deletes only | FERPA requires audit trail, hard deletion of student records is inappropriate | Richard |
 | 2026-03-01 | Row-level security in Supabase | Defense-in-depth — database enforces access control independent of application code | Richard |
+| 2026-03-01 | Pin Next.js at 14.2.35 for initial development; plan upgrade to 15/16 before go-live | Next.js 14.2.35 is the latest patched 14.x release. Two high-severity DoS CVEs (GHSA-9g9p-9gw9-jx7f, GHSA-h25m-26qc-wcjf) have no fix in the 14.x line — only Next.js 16+ patches them. Risk is acceptable during development given the app is internal, fully authenticated via Azure AD, and hosted on Vercel. Upgrade must be completed before production go-live. | Richard |
